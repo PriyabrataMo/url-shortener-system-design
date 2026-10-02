@@ -1,0 +1,129 @@
+x-runtime-limits: &runtime-limits
+  mem_limit: 512m
+  memswap_limit: 512m
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+services:
+  postgres:
+    <<: *runtime-limits
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: urlshortener
+      POSTGRES_USER: urlshortener
+      POSTGRES_PASSWORD: urlshortener
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U urlshortener -d urlshortener"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    <<: *runtime-limits
+    image: redis:8-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    <<: *runtime-limits
+    build:
+      context: ./backend
+    environment:
+      DATABASE_URL: postgresql://urlshortener:urlshortener@postgres:5432/urlshortener
+      REDIS_URL: redis://redis:6379/0
+      SHORT_URL_BASE: ${SHORT_URL_BASE:-http://localhost:8000/r}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+    expose:
+      - "8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  analytics-worker:
+    <<: *runtime-limits
+    build:
+      context: ./backend
+    environment:
+      DATABASE_URL: postgresql://urlshortener:urlshortener@postgres:5432/urlshortener
+      REDIS_URL: redis://redis:6379/0
+      CLICK_STREAM: click-events
+      CLICK_CONSUMER_GROUP: analytics-workers
+      CLICK_CONSUMER: worker-1
+      CLICK_BATCH_SIZE: 500
+    command: ["uv", "run", "python", "-m", "app.analytics_worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  gateway:
+    <<: *runtime-limits
+    image: nginx:1.27-alpine
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./infra/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+
+  frontend:
+    <<: *runtime-limits
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - gateway
+
+  k6:
+    <<: *runtime-limits
+    image: grafana/k6:latest
+    profiles: ["loadtest"]
+    environment:
+      TARGET_URL: http://gateway:8000
+    volumes:
+      - ./load-tests:/scripts:ro
+    command: run /scripts/redirect.js
+    depends_on:
+      - gateway
+
+  k6-public:
+    <<: *runtime-limits
+    image: grafana/k6:latest
+    profiles: ["public-loadtest"]
+    environment:
+      TARGET_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    volumes:
+      - ./load-tests:/scripts:ro
+    command: run /scripts/redirect.js
+
+  cloudflared:
+    <<: *runtime-limits
+    image: cloudflare/cloudflared:latest
+    profiles: ["public"]
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - gateway
+
+volumes:
+  postgres-data:
