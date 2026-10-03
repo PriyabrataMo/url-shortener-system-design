@@ -113,6 +113,35 @@ Production discussion:
 - CDN or edge caching for immutable redirects
 - Global routing and regional failover
 
+### MongoDB replication timing
+
+If MongoDB is selected instead of PostgreSQL, writes normally go to the primary of a replica set. The primary updates its data, records an operation in the oplog, and secondaries continuously read and apply those oplog operations locally. A secondary does not copy the entire database after every write.
+
+```text
+Client write
+    ↓
+Replica-set primary updates data and oplog
+    ↓
+Secondaries read the oplog
+    ↓
+Each secondary updates its own data and indexes
+```
+
+With `w: 1`, the primary can acknowledge before secondaries finish applying the operation. With `w: "majority"`, MongoDB waits for acknowledgement from a majority of voting data-bearing members. The stronger write concern improves durability but can increase write latency.
+
+When a new secondary joins, it performs an initial sync of the existing data, builds indexes, and then applies newer oplog entries until it catches up. The time between the primary and a secondary is replication lag.
+
+For a URL shortener, replica lag creates a read-after-write question: a user may create a URL and immediately follow it before a secondary has applied the mapping. Route that first read to the primary or serve it from the cache warmed after creation. Later redirect reads can use replicas if the application accepts a small amount of eventual consistency.
+
+Useful operational checks include:
+
+```javascript
+rs.status()
+rs.printSecondaryReplicationInfo()
+```
+
+The interview explanation is: “The primary accepts the write and publishes it through the oplog. Secondaries replay the operation asynchronously. I choose `w: \"majority\"` when the write must survive a primary failure, monitor replication lag, and route read-after-write traffic to the primary or cache.”
+
 ## 8. HTTP redirect trade-off
 
 - `302`: temporary redirect; common default while destinations may change.
@@ -138,3 +167,10 @@ Run load tests gradually. A `137` exit from the k6 container means the generator
 ## 10. Interview closing summary
 
 “I would keep URL creation strongly durable in a relational mapping store, make the redirect service stateless, serve hot mappings from local and distributed caches, protect misses with negative caching and single-flight locks, and move analytics to an asynchronous stream. I would scale PostgreSQL reads with replicas first, then partition or shard when required, while adding multi-AZ failover, backups, rate limiting, abuse protection, and observability.”
+
+## 11. Further reading
+
+- [MongoDB replica-set oplog](https://www.mongodb.com/docs/manual/core/replica-set-oplog/)
+- [MongoDB write concern](https://www.mongodb.com/docs/manual/reference/write-concern/)
+- [MongoDB sharding](https://www.mongodb.com/docs/manual/sharding/)
+- [MongoDB WiredTiger storage engine](https://www.mongodb.com/docs/manual/core/wiredtiger/)
